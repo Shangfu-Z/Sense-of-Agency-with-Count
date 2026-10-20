@@ -1,0 +1,737 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Move The Dot Toward The Box</title>
+  <style>
+    body { font-family: Arial, sans-serif; display:flex; flex-direction:column; align-items:center; gap:12px; padding:20px; }
+    #figure { border:1px solid #888; width:640px; padding:8px; display:flex; justify-content:center; }
+    #canvasContainer { background:#f7f7f7; padding:6px; }
+    canvas { background: #fff; display:block; }
+    #status { min-height:24px; }
+
+    /* shared overlay look (matches the original rating overlay) */
+    .overlay {
+      position:fixed; left:0; top:0; width:100%; height:100%; display:flex;
+      align-items:center; justify-content:center; background: rgba(0,0,0,0.35);
+      visibility:hidden;
+    }
+    .overlayBox {
+      background:white; padding:20px; border-radius:8px; min-width:420px; max-width:520px; text-align:center;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+    }
+    #sliderBar { margin-top:10px; display:flex; align-items:center; gap:12px; }
+    #sliderTrack { height:12px; background:#ddd; flex:1; position:relative; border-radius:6px; }
+    #sliderKnob {
+      width:18px; height:18px; border-radius:50%; background:#333; position:absolute; top:50%;
+      transform:translate(-50%,-50%);
+    }
+    .instructions { font-size:13px; color:#444; }
+    button { padding:6px 12px; }
+
+    /* intro */
+    #introText { font-size:17px; line-height:1.5; text-align:left; }
+    #introText h3 { text-align:center; }
+
+    /* consent */
+    #consentButtons { margin-top:16px; display:flex; justify-content:center; gap:16px; }
+    #consentButtons button { font-size:15px; padding:8px 20px; }
+    #declinedBox { display:none; text-align:center; max-width:560px; margin-top:40px; font-size:17px; }
+
+    /* count question */
+    #countInput { font-size:18px; width:80px; text-align:center; padding:4px; margin-top:12px; }
+    #countError { color:#b00020; font-size:13px; min-height:18px; margin-top:8px; }
+
+    /* end-of-experiment fallback */
+    #endBox { display:none; text-align:center; max-width:560px; }
+  </style>
+</head>
+<body>
+  <h2>Move The Dot Toward The Box</h2>
+  <div id="figure">
+    <div id="canvasContainer">
+      <!-- Canvas uses 600x400 box (pixels) but drawing uses normalized coords [0,1] -->
+      <canvas id="expCanvas" width="600" height="400"></canvas>
+    </div>
+  </div>
+
+  <div id="status"></div>
+  <div id="endBox">
+    <p id="endMsg"></p>
+    <button id="downloadBtn">Download my data file</button>
+  </div>
+
+  <!-- Consent overlay (shown first) -->
+  <div id="consentOverlay" class="overlay">
+    <div class="overlayBox">
+      <h3 style="margin-top:0;">AGREEMENT TO PARTICIPATE</h3>
+      <p>Click on the "I Agree" button to confirm your agreement to take part in the research.</p>
+      <p style="margin-top:1.5em;">If you choose to participate, please complete the experiment in one session. Do not quit in the middle and restart.</p>
+      <div id="consentButtons">
+        <button id="agreeBtn">I Agree</button>
+        <button id="disagreeBtn">I Disagree</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shown if the participant declines and the browser won't let the page close itself -->
+  <div id="declinedBox">
+    <p>You have chosen not to take part in this research. No data have been recorded.</p>
+    <p>You may now close this window.</p>
+  </div>
+
+  <!-- Intro overlay (shown after consent) -->
+  <div id="introOverlay" class="overlay">
+    <div class="overlayBox">
+      <div id="introText">
+        <h3 style="margin-top:0;">Instructions</h3>
+        <p>In this task, you will move a dot toward a green square using the arrow keys. On each trial, a green square appears on one side of the box. Press the arrow key that points toward it, and the dot will move.</p>
+        <p>After every 10 trials, you will be asked to recall the number of trials that the ball moved in the direction of the arrow key you pressed.</p>
+        <p>After every 10 trials, you will also be asked to rate how much control you felt.</p>
+        <p><b>Press any arrow keys to continue.</b></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Count question overlay (shown before the rating) -->
+  <div id="countOverlay" class="overlay">
+    <div class="overlayBox">
+      <div id="countPrompt">On how many of the last 10 trials did the ball move<br>in the direction of the arrow key you pressed?</div>
+      <div>
+        <input id="countInput" type="text" inputmode="numeric" autocomplete="off" maxlength="2"/>
+        <button id="countSubmit">Submit</button>
+      </div>
+      <div id="countError"></div>
+      <div class="instructions">Type a whole number from 0 to 10, then press ENTER or click Submit.</div>
+    </div>
+  </div>
+
+  <!-- Rating overlay -->
+  <div id="ratingOverlay" class="overlay">
+    <div class="overlayBox">
+      <div id="ratingPrompt">To what extent did you feel in control during past 10 trials?<br>Press SPACE to confirm your response.</div>
+      <div id="sliderBar">
+        <div id="sliderTrack">
+          <div id="sliderKnob"></div>
+        </div>
+        <div id="sliderValue">You entered: 0.0</div>
+      </div>
+      <div style="margin-top:12px;">
+        <div class="instructions">Use LEFT/RIGHT arrow keys to change slider by 0.1. Press SPACE to confirm.</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+  Experiment 3 — sense of agency + trial-count report (20 blocks).
+  - Subject ID: last 5 digits of Date.now(); RNG seeded from it.
+  - Error schedule: ascending (0..9) + descending (9..0); order counterbalanced by ID parity.
+  - After trial 10: count question (0–10), then the agency rating.
+  - Logging: rows are kept in localStorage and sent ONCE PER BLOCK (after the rating).
+    Each block is a batch with a unique batch_id; the server skips batch_ids it has already
+    written, so retries can never create duplicate rows. A batch only leaves the local queue
+    after the server confirms it.
+*/
+
+(() => {
+  // ---------- CONFIG ----------
+  const BOX_W = 600, BOX_H = 400;
+  const DOT_RADIUS_NORM = 0.02;
+  const SQUARE_SIZE_NORM = 0.06;
+  const ANIMATION_DURATION = 400;
+  const BLOCKS = 20;
+  const TRIALS_PER_BLOCK = 10;
+
+  // logging
+  // !!! Paste the Web App URL (ends in /exec) from the Apps Script attached to the new sheet:
+  // https://docs.google.com/spreadsheets/d/1bVLvvzo1Y2m3wFpcri_6CbJkK0K0VNnwakbCc6j-iyc
+  const SHEET_ENDPOINT = 'https://script.google.com/macros/s/AKfycbykmeHB8DPKRZ8KehHAKn1CzjuSvbA1cPJxE_LSubgtuOW29p1mgyfTjby8r-fd8XsF/exec';
+  const STORAGE_PREFIX = 'agency_count_';  // localStorage key prefix (different from Exp 2)
+  const MAX_SEND_ATTEMPTS = 5;             // per flush; backoff 1s, 2s, 4s, 8s
+  const COLUMNS = ['Timestamp','Subject_ID','Block','Trial','Expected_Direction','Response_Key',
+                   'Error_Occurred','Key_Presses','Rating','Rating_initial','Block_error','RT',
+                   'Response_number','Recall_time'];
+
+  // ---------- SUBJECT / RNG ----------
+  // Subject ID: use the survey code from the link (e.g. ...?survey_code=%SURVEY_CODE%) if one
+  // was given; otherwise generate one from the last 5 digits of Date.now().
+  const now = Date.now().toString();
+  function getSurveyCode() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      for (const name of ['survey_code', 'SURVEY_CODE', 'id']) {
+        const v = (params.get(name) || '').trim();
+        // ignore empty values and an unfilled placeholder like "%SURVEY_CODE%"
+        if (v && !v.includes('%')) return v;
+      }
+    } catch(e) {}
+    return null;
+  }
+  const surveyCode = getSurveyCode();
+  const subject_id = surveyCode || now.slice(-5);
+
+  // Numeric key used for the RNG seed and the odd/even counterbalancing.
+  // Numeric codes are used as-is; any non-numeric code is hashed to a number.
+  function idToInt(id) {
+    if (/^\d+$/.test(id)) return parseInt(id.slice(-9), 10);
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (Math.imul(h, 31) + id.charCodeAt(i)) >>> 0;
+    return h;
+  }
+  const idInt = idToInt(subject_id);
+  function mulberry32(a) {
+    return function() {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+  }
+  const seedInt = idInt || 1;
+  const rnd = mulberry32(seedInt);
+  function rInt(min, max) { return Math.floor(rnd()*(max-min+1))+min; }
+
+  // ---------- Canvas ----------
+  const canvas = document.getElementById('expCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = BOX_W; canvas.height = BOX_H;
+  function toPixelX(nx){ return nx * BOX_W; }
+  function toPixelY(ny){ return ny * BOX_H; }
+  function clearCanvas(){ ctx.clearRect(0,0,BOX_W,BOX_H); }
+
+  // ---------- UI elements ----------
+  const status = document.getElementById('status');
+  const introOverlay = document.getElementById('introOverlay');
+  const countOverlay = document.getElementById('countOverlay');
+  const countInput = document.getElementById('countInput');
+  const countSubmit = document.getElementById('countSubmit');
+  const countError = document.getElementById('countError');
+  const ratingOverlay = document.getElementById('ratingOverlay');
+  const sliderTrack = document.getElementById('sliderTrack');
+  const sliderKnob = document.getElementById('sliderKnob');
+  const sliderValue = document.getElementById('sliderValue');
+  const endBox = document.getElementById('endBox');
+  const endMsg = document.getElementById('endMsg');
+  const downloadBtn = document.getElementById('downloadBtn');
+
+  // ---------- Experiment state ----------
+  let blockIndex = 0;
+  let trialIndex = 0;
+  let currentBlockErrorCount = 0;
+  let errorTrialPositions = [];
+  let trialInProgress = false;
+  let dotPos = {x:0.5, y:0.5};
+  let greenDirection = null;
+  let keyPressCount = 0;
+  let expectedDirection = null;
+  let awaitingKey = false;
+  let trialStartTime = 0;
+
+  // rows for the block in progress (sent together once the block is complete)
+  let blockRows = [];
+
+  // ---------- Block error schedule: 20 blocks, no shuffled section ----------
+  const ascending  = Array.from({length:10}, (_,i)=>i);      // [0..9]
+  const descending = Array.from({length:10}, (_,i)=>9 - i);  // [9..0]
+  let blocksErrorValues;
+  if (idInt % 2 === 1) {
+    blocksErrorValues = [...ascending, ...descending];   // odd ID
+  } else {
+    blocksErrorValues = [...descending, ...ascending];   // even ID
+  }
+
+  // ======================================================================
+  //  LOGGING: localStorage queue + one POST per block + server-side dedupe
+  // ======================================================================
+  const QUEUE_KEY = STORAGE_PREFIX + 'queue_' + subject_id;  // unsent batches
+  const ALL_KEY   = STORAGE_PREFIX + 'all_' + subject_id;    // every row, for the backup file
+
+  function lsGet(key, fallback) {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+    catch(e) { return fallback; }
+  }
+  function lsSet(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); return true; }
+    catch(e) { console.warn('localStorage unavailable', e); return false; }
+  }
+
+  // in-memory mirrors, used if localStorage is blocked
+  let memQueue = lsGet(QUEUE_KEY, []);
+  let memAll = lsGet(ALL_KEY, []);
+
+  function getQueue() { return memQueue; }
+  function setQueue(q) { memQueue = q; lsSet(QUEUE_KEY, q); }
+
+  function enqueueBlock(blockNumber, rows) {
+    const batch = {
+      batch_id: subject_id + '_' + now + '_b' + blockNumber,  // unique per subject + session + block
+      subject_id,
+      block: blockNumber,
+      rows
+    };
+    setQueue([...getQueue(), batch]);
+    memAll = [...memAll, ...rows];
+    lsSet(ALL_KEY, memAll);
+  }
+
+  // Send a list of batches. Resolves with the batch_ids the server confirmed.
+  async function postBatches(batches) {
+    const resp = await fetch(SHEET_ENDPOINT, {
+      method: 'POST',
+      // text/plain is a "simple" request: no CORS preflight, and Apps Script can still return a readable reply
+      headers: {'Content-Type': 'text/plain;charset=utf-8'},
+      body: JSON.stringify({batches})
+    });
+    const data = await resp.json();
+    if (data.status !== 'ok' || !Array.isArray(data.acked)) {
+      throw new Error('Server error: ' + JSON.stringify(data));
+    }
+    return data.acked;
+  }
+
+  let flushing = null;  // prevents two flushes running at once
+  function flushQueue() {
+    if (flushing) return flushing;
+    flushing = (async () => {
+      for (let attempt = 0; attempt < MAX_SEND_ATTEMPTS; attempt++) {
+        const pending = getQueue();
+        if (pending.length === 0) return true;
+        try {
+          const acked = await postBatches(pending);
+          setQueue(getQueue().filter(b => !acked.includes(b.batch_id)));
+          if (getQueue().length === 0) return true;
+        } catch(err) {
+          console.warn(`Send attempt ${attempt+1} failed`, err);
+        }
+        await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+      }
+      return getQueue().length === 0;
+    })().finally(() => { flushing = null; });
+    return flushing;
+  }
+
+  // Last-chance send if the tab is closed mid-experiment. The server dedupes, so a
+  // beacon that duplicates an in-flight fetch is harmless.
+  window.addEventListener('pagehide', () => {
+    const pending = getQueue();
+    if (pending.length && navigator.sendBeacon) {
+      const blob = new Blob([JSON.stringify({batches: pending})], {type: 'text/plain;charset=utf-8'});
+      navigator.sendBeacon(SHEET_ENDPOINT, blob);
+    }
+  });
+
+  // On load, send anything left behind by an earlier session on this browser.
+  function flushLeftoversFromEarlierSessions() {
+    try {
+      const leftovers = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(STORAGE_PREFIX + 'queue_') && k !== QUEUE_KEY) {
+          leftovers.push(k);
+        }
+      }
+      leftovers.forEach(async (k) => {
+        const q = lsGet(k, []);
+        if (!q.length) { localStorage.removeItem(k); return; }
+        try {
+          const acked = await postBatches(q);
+          const rest = q.filter(b => !acked.includes(b.batch_id));
+          if (rest.length) lsSet(k, rest); else localStorage.removeItem(k);
+        } catch(e) { /* try again on a future visit */ }
+      });
+    } catch(e) { /* localStorage blocked */ }
+  }
+
+  function downloadData() {
+    const header = COLUMNS.join(',');
+    const lines = memAll.map(r => COLUMNS.map(c => {
+      const v = r[c] === undefined ? '' : String(r[c]);
+      return /[",\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v;
+    }).join(','));
+    const blob = new Blob([header + '\n' + lines.join('\n')], {type:'text/csv'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `agency_count_${subject_id}.csv`;
+    a.click();
+  }
+  downloadBtn.addEventListener('click', downloadData);
+
+  // ---------- Beep ----------
+  function beep(duration=120, freq=800, volume=0.05) {
+    try {
+      const actx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = actx.createOscillator();
+      const g = actx.createGain();
+      o.connect(g); g.connect(actx.destination);
+      g.gain.value = volume;
+      o.type = 'sine';
+      o.frequency.value = freq;
+      o.start(0);
+      setTimeout(()=> { o.stop(); actx.close(); }, duration);
+    } catch(e){ }
+  }
+
+  // ---------- Geometry / drawing (unchanged) ----------
+  function pickDirection() {
+    const idx = rInt(0,3);
+    return ['up','down','left','right'][idx];
+  }
+  function directionToPosition(dir) {
+    const center = {x:0.5,y:0.5};
+    const margin = 0.3;
+    if(dir === 'up') return {x:center.x, y: center.y - margin};
+    if(dir === 'down') return {x:center.x, y: center.y + margin};
+    if(dir === 'left') return {x:center.x - margin, y: center.y};
+    if(dir === 'right') return {x:center.x + margin, y: center.y};
+    return center;
+  }
+  function drawDot(nx, ny) {
+    const px = toPixelX(nx), py = toPixelY(ny);
+    ctx.beginPath();
+    ctx.fillStyle = 'black';
+    ctx.arc(px, py, DOT_RADIUS_NORM * BOX_W, 0, Math.PI*2);
+    ctx.fill();
+  }
+  function drawGreenSquare(dir) {
+    const pos = directionToPosition(dir);
+    const sizePx = SQUARE_SIZE_NORM * BOX_W;
+    const px = toPixelX(pos.x) - sizePx/2;
+    const py = toPixelY(pos.y) - (SQUARE_SIZE_NORM*BOX_H)/2;
+    ctx.fillStyle = 'green';
+    ctx.fillRect(px, py, sizePx, SQUARE_SIZE_NORM * BOX_H);
+  }
+  function renderScene(dotX, dotY, greenDir) {
+    clearCanvas();
+    ctx.strokeStyle = '#aaa';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, BOX_W-1, BOX_H-1);
+    if(greenDir) drawGreenSquare(greenDir);
+    drawDot(dotX, dotY);
+  }
+  function animateDotTo(targetNx, targetNy, durationMs, onComplete) {
+    const startX = dotPos.x, startY = dotPos.y;
+    const t0 = performance.now();
+    function step(nowT) {
+      const t = Math.min(1, (nowT - t0) / durationMs);
+      const ease = t<0.5 ? 2*t*t : -1 + (4-2*t)*t;
+      dotPos.x = startX + (targetNx - startX)*ease;
+      dotPos.y = startY + (targetNy - startY)*ease;
+      renderScene(dotPos.x, dotPos.y, greenDirection);
+      if(t < 1) requestAnimationFrame(step);
+      else {
+        dotPos.x = targetNx; dotPos.y = targetNy;
+        renderScene(dotPos.x, dotPos.y, greenDirection);
+        if(onComplete) onComplete();
+      }
+    }
+    requestAnimationFrame(step);
+  }
+
+  // ---------- Trial flow ----------
+  function startBlock(bidx) {
+    blockIndex = bidx;
+    trialIndex = 0;
+    blockRows = [];
+    currentBlockErrorCount = blocksErrorValues[bidx];
+    errorTrialPositions = [];
+    const allIdx = Array.from({length:TRIALS_PER_BLOCK}, (_,i)=>i);
+    for(let k=0;k<currentBlockErrorCount;k++){
+      const i = rInt(0, allIdx.length-1);
+      errorTrialPositions.push(allIdx.splice(i,1)[0]);
+    }
+    status.innerText = `Let's Go!!!`;
+    setTimeout(()=> startTrial(), 400);
+  }
+
+  function startTrial() {
+    trialStartTime = performance.now();
+    trialInProgress = true;
+    keyPressCount = 0;
+    dotPos = {x:0.5, y:0.5};
+    greenDirection = pickDirection();
+    expectedDirection = greenDirection;
+    renderScene(dotPos.x, dotPos.y, greenDirection);
+    awaitingKey = true;
+    status.innerText = `Block ${blockIndex+1}, Trial ${trialIndex+1}: Press the arrow key toward the green square.`;
+  }
+
+  function endTrial(data) {
+    const rt = performance.now() - trialStartTime;
+    // Block-level fields (Rating, Rating_initial, Response_number, Recall_time) are filled
+    // on trial 10 after the rating; trials 1–9 keep these defaults.
+    blockRows.push({
+      Timestamp: new Date().toISOString(),
+      Subject_ID: subject_id,
+      Block: blockIndex+1,
+      Trial: trialIndex+1,
+      Expected_Direction: data.expected_direction,
+      Response_Key: data.response_key,
+      Error_Occurred: data.error_occurred,
+      Key_Presses: data.key_presses,
+      Rating: 0,
+      Rating_initial: 0,
+      Block_error: blocksErrorValues[blockIndex],
+      RT: rt.toFixed(2),
+      Response_number: '',
+      Recall_time: ''
+    });
+
+    trialInProgress = false;
+    awaitingKey = false;
+    greenDirection = null;
+    renderScene(dotPos.x, dotPos.y, null);
+
+    trialIndex++;
+
+    if(trialIndex >= TRIALS_PER_BLOCK) {
+      runEndOfBlock();
+      return;
+    }
+    setTimeout(()=> startTrial(), 400);
+  }
+
+  function runEndOfBlock() {
+    showCountOverlay().then(({response, recallTime}) => {
+      return showRatingOverlay().then(({rating, initial}) => {
+        // fill block-level fields on trial 10, then queue and send the whole block
+        const last = blockRows[blockRows.length - 1];
+        last.Rating = rating;
+        last.Rating_initial = initial;
+        last.Response_number = response;
+        last.Recall_time = recallTime.toFixed(2);
+
+        enqueueBlock(blockIndex+1, blockRows);
+        flushQueue();  // runs in the background; the next block starts right away
+
+        if(blockIndex+1 < BLOCKS) {
+          startBlock(blockIndex+1);
+        } else {
+          finishExperiment();
+        }
+      });
+    });
+  }
+
+  async function finishExperiment() {
+    status.innerText = 'Saving your data. Please keep this page open…';
+    const ok = await flushQueue();
+    if(ok) {
+      status.innerText = 'Experiment finished. Thank you!';
+      alert('Experiment finished. Thank you!');
+    } else {
+      status.innerText = '';
+      endMsg.innerText = 'The experiment is finished, but some of your data could not be uploaded. '
+        + 'Please download your data file and send it to the researcher. Subject ID: ' + subject_id;
+      endBox.style.display = 'block';
+    }
+  }
+
+  function flashColor(color, duration = 150) {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(0,0,BOX_W,BOX_H);
+    ctx.restore();
+    setTimeout(() => renderScene(dotPos.x, dotPos.y, null), duration);
+  }
+
+  // ---------- Key handling ----------
+  function keyToDir(key) {
+    if(key === 'ArrowUp') return 'up';
+    if(key === 'ArrowDown') return 'down';
+    if(key === 'ArrowLeft') return 'left';
+    if(key === 'ArrowRight') return 'right';
+    return null;
+  }
+
+  window.addEventListener('keydown', (ev) => {
+    // count overlay owns the keyboard (participant is typing)
+    if(countOverlay.style.visibility === 'visible') return;
+    // swallow keys during other overlays so stray presses don't leak into trials
+    if(consentOverlay.style.visibility === 'visible') { ev.preventDefault(); return; }
+    if(introOverlay.style.visibility === 'visible') { ev.preventDefault(); return; }
+    if(ratingOverlay.style.visibility === 'visible') { ev.preventDefault(); return; }
+
+    if(!trialInProgress || !awaitingKey) return;
+    const dir = keyToDir(ev.key);
+    if(!dir) return;
+    ev.preventDefault();
+    keyPressCount++;
+    if(dir !== expectedDirection) {
+      beep(100, 600);
+      status.innerText = `Wrong direction. Try again. Key presses: ${keyPressCount}`;
+      return;
+    }
+    awaitingKey = false;  // ignore further presses while the dot is moving
+    const isErrorTrial = errorTrialPositions.includes(trialIndex);
+    if(isErrorTrial) {
+      const opposite = {up:'down', down:'up', left:'right', right:'left'}[dir];
+      const target = directionToPosition(opposite);
+      animateDotTo(target.x, target.y, ANIMATION_DURATION, () => {
+        flashColor('red');
+        setTimeout(() => {
+          endTrial({
+            expected_direction: expectedDirection,
+            response_key: dir,
+            error_occurred: true,
+            key_presses: keyPressCount
+          });
+        }, 150);
+      });
+    } else {
+      const target = directionToPosition(dir);
+      animateDotTo(target.x, target.y, ANIMATION_DURATION, () => {
+        flashColor('green');
+        setTimeout(() => {
+          endTrial({
+            expected_direction: expectedDirection,
+            response_key: dir,
+            error_occurred: false,
+            key_presses: keyPressCount
+          });
+        }, 150);
+      });
+    }
+  });
+
+  // ---------- Count question (0–10). Resolves with { response, recallTime } ----------
+  function showCountOverlay() {
+    return new Promise((resolve) => {
+      countInput.value = '';
+      countError.innerText = '';
+      countOverlay.style.visibility = 'visible';
+      status.innerText = 'How many trials did the ball move the way you pressed?';
+      const recallStart = performance.now();
+      setTimeout(() => countInput.focus(), 0);
+
+      function attempt() {
+        const raw = countInput.value.trim();
+        const valid = /^\d{1,2}$/.test(raw) && Number(raw) >= 0 && Number(raw) <= 10;
+        if(!valid) {
+          countError.innerText = 'Please enter a valid whole number from 0 to 10.';
+          countInput.value = '';
+          countInput.focus();
+          return;
+        }
+        const recallTime = performance.now() - recallStart;
+        cleanup();
+        resolve({ response: Number(raw), recallTime });
+      }
+      function onKey(ev) {
+        if(ev.key === 'Enter') { ev.preventDefault(); attempt(); }
+      }
+      function cleanup() {
+        countOverlay.style.visibility = 'hidden';
+        countInput.blur();
+        countInput.removeEventListener('keydown', onKey);
+        countSubmit.removeEventListener('click', attempt);
+      }
+
+      countInput.addEventListener('keydown', onKey);
+      countSubmit.addEventListener('click', attempt);
+    });
+  }
+
+  // ---------- Rating overlay (same as original; also returns the start value) ----------
+  function showRatingOverlay() {
+    return new Promise((resolve) => {
+      const possible = Array.from({length:9}, (_,i)=> (i+1)/10 );  // [0.1 .. 0.9]
+      const startIdx = rInt(0, possible.length - 1);
+      const initial = possible[startIdx];
+      let currentValue = initial;
+
+      function updateKnob() {
+        const trackW = sliderTrack.clientWidth;
+        sliderKnob.style.left = `${currentValue * trackW}px`;
+        sliderValue.innerText = `You entered: ${currentValue.toFixed(1)}`;
+      }
+
+      function onKey(ev) {
+        if(ev.key === 'ArrowLeft') {
+          ev.preventDefault();
+          currentValue = Math.max(0, +(currentValue - 0.1).toFixed(1));
+          updateKnob();
+        } else if(ev.key === 'ArrowRight') {
+          ev.preventDefault();
+          currentValue = Math.min(1, +(currentValue + 0.1).toFixed(1));
+          updateKnob();
+        } else if(ev.key === ' ' || ev.code === 'Space') {
+          ev.preventDefault();
+          cleanup();
+          resolve({ rating: currentValue, initial });
+        }
+      }
+
+      function cleanup() {
+        ratingOverlay.style.visibility = 'hidden';
+        window.removeEventListener('keydown', onKey);
+      }
+
+      ratingOverlay.style.visibility = 'visible';
+      status.innerText = 'Rate how in control you felt.';
+      setTimeout(()=> { updateKnob(); }, 0);
+      window.addEventListener('keydown', onKey);
+    });
+  }
+
+  // ---------- Initialization ----------
+  const ARROWS = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+  renderScene(dotPos.x, dotPos.y, null);
+  flushLeftoversFromEarlierSessions();
+
+  // 0) consent pop-up: "I Agree" -> instructions; "I Disagree" -> close the page
+  const consentOverlay = document.getElementById('consentOverlay');
+  const declinedBox = document.getElementById('declinedBox');
+  consentOverlay.style.visibility = 'visible';
+
+  document.getElementById('agreeBtn').addEventListener('click', (ev) => {
+    ev.currentTarget.blur();  // so a later key press can't re-trigger the button
+    consentOverlay.style.visibility = 'hidden';
+    showIntro();
+  });
+
+  document.getElementById('disagreeBtn').addEventListener('click', () => {
+    consentOverlay.style.visibility = 'hidden';
+    window.close();
+    // Browsers only let a page close itself in some cases (e.g. when a script opened it).
+    // If the tab is still open, clear the page and tell the participant to close it.
+    setTimeout(() => {
+      document.querySelectorAll('body > *:not(script)').forEach(el => { el.style.display = 'none'; });
+      declinedBox.style.display = 'block';
+    }, 100);
+  });
+
+  // 1) intro pop-up, closed with any arrow key
+  function showIntro() {
+    introOverlay.style.visibility = 'visible';
+    window.addEventListener('keydown', closeIntro);
+  }
+  function closeIntro(ev) {
+    if(!ARROWS.includes(ev.key)) return;
+    ev.preventDefault();
+    window.removeEventListener('keydown', closeIntro);
+    introOverlay.style.visibility = 'hidden';
+    status.innerText = `Subject ID: ${subject_id}. Press any arrow key when ready.`;
+    // attach on the next tick so the key that closed the intro doesn't also start block 1
+    setTimeout(() => window.addEventListener('keydown', startOnAnyArrowOnce), 0);
+  }
+
+  // 2) any arrow key starts block 1
+  function startOnAnyArrowOnce(ev) {
+    if(ARROWS.includes(ev.key)) {
+      window.removeEventListener('keydown', startOnAnyArrowOnce);
+      startBlock(0);
+    }
+  }
+
+  window.__exp_debug = {
+    subject_id, seedInt, blocksErrorValues,
+    get queue(){ return getQueue(); },
+    get allRows(){ return memAll; },
+    download: downloadData
+  };
+})();
+</script>
+</body>
+</html>
